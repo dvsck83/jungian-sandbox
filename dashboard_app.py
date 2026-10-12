@@ -7,6 +7,7 @@ trigger simulated events, including an automated live-feed heartbeat.
 
 from __future__ import annotations
 
+import html
 import io
 import random
 import time
@@ -16,6 +17,7 @@ from typing import Any
 import pandas as pd
 import streamlit as st
 
+from analyst_node import AnalystNode
 from bridge_controller import (
     CORTISOL_MAX,
     CORTISOL_MIN,
@@ -76,6 +78,12 @@ def _init_state() -> None:
         st.session_state.auto_live_feed = False
     if "heartbeat_count" not in st.session_state:
         st.session_state.heartbeat_count = 0
+    if "analyst" not in st.session_state:
+        st.session_state.analyst = AnalystNode()
+    if "deception_series" not in st.session_state:
+        st.session_state.deception_series = [8.0]
+    if "last_analyst" not in st.session_state:
+        st.session_state.last_analyst = None
 
 
 def _sample_cortisol(band: tuple[int, int]) -> int:
@@ -109,6 +117,10 @@ def _trim_memory() -> None:
     _trim_list(controller.history, MAX_CONTROLLER_HISTORY)
     _trim_list(controller.persona.session_notes, MAX_LOG_ENTRIES)
     _trim_list(controller.shadow.incident_log, MAX_LOG_ENTRIES)
+    _trim_list(st.session_state.deception_series, MAX_SERIES_POINTS)
+    analyst: AnalystNode = st.session_state.analyst
+    _trim_list(analyst.history, MAX_CONTROLLER_HISTORY)
+    _trim_list(analyst.findings, MAX_LOG_ENTRIES)
 
 
 def _record_outputs(cycle: dict[str, Any]) -> None:
@@ -153,6 +165,16 @@ def trigger_event(event_name: str, samples: int = 1) -> None:
     st.session_state.last_event = event_name
     st.session_state.cortisol_series[-1] = cycle["cortisol_level"]
     _record_outputs(cycle)
+    report = st.session_state.analyst.evaluate(
+        cycle,
+        persona_log=st.session_state.persona_log,
+        shadow_log=st.session_state.shadow_log,
+        last_event=event_name,
+    )
+    st.session_state.last_analyst = report
+    while len(st.session_state.deception_series) < len(st.session_state.cortisol_series) - 1:
+        st.session_state.deception_series.append(st.session_state.deception_series[-1])
+    st.session_state.deception_series.append(report["deception_probability"])
     _trim_memory()
 
 
@@ -193,6 +215,33 @@ def _inject_styles() -> None:
             font-size: 0.8rem;
             font-weight: 600;
         }
+        .gauge-shell {
+            background: #101828;
+            border: 1px solid #344054;
+            border-radius: 14px;
+            padding: 0.9rem 1rem 1rem 1rem;
+            min-height: 280px;
+        }
+        .gauge-shell h3 {
+            color: #f8fafc;
+            font-size: 0.95rem;
+            margin: 0 0 0.35rem 0;
+        }
+        .gauge-shell .score {
+            color: #f8fafc;
+            font-size: 2rem;
+            font-weight: 700;
+            margin: 0.15rem 0 0.7rem 0;
+        }
+        .gauge-track {
+            width: 100%;
+            height: 14px;
+            background: #1d2939;
+            border-radius: 999px;
+            overflow: hidden;
+        }
+        .gauge-fill { height: 100%; border-radius: 999px; }
+        .gauge-note { color: #d0d5dd; font-size: 0.8rem; margin-top: 0.7rem; }
         </style>
         """,
         unsafe_allow_html=True,
@@ -220,21 +269,68 @@ def _header(active_node: str, cortisol: int) -> None:
     )
 
 
+def _gauge_color(score: float) -> str:
+    if score >= 65:
+        return "#f97066"
+    if score >= 35:
+        return "#fdb022"
+    return "#6ce9a6"
+
+
+def _render_deception_gauge() -> None:
+    score = float(st.session_state.deception_series[-1])
+    report = st.session_state.last_analyst or {}
+    components = report.get("components") or {}
+    findings = report.get("findings") or st.session_state.analyst.findings[-1:]
+    note = findings[-1] if findings else "Analyst idle. Awaiting a dual-node cycle."
+    fill = _gauge_color(score)
+    st.markdown(
+        f"""
+        <div class="gauge-shell">
+          <h3>Concept C - Vector Lie Detector</h3>
+          <div class="score">{score:.1f}%</div>
+          <div class="gauge-track">
+            <div class="gauge-fill" style="width:{score}%;background:{fill};"></div>
+          </div>
+          <div class="gauge-note">{html.escape(note)}</div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+    st.caption(
+        "Downplay {downplay}% · Obfuscation {obfuscation}% · Incongruence {incongruence}%".format(
+            downplay=components.get("persona_downplay", 0),
+            obfuscation=components.get("shadow_obfuscation", 0),
+            incongruence=components.get("state_incongruence", 0),
+        )
+    )
+
+
 def _render_chart_and_logs() -> None:
-    st.subheader("Interoceptive cortisol")
-    chart_df = pd.DataFrame(
-        {
-            "cycle": st.session_state.cycle_index,
-            "cortisol_level": st.session_state.cortisol_series,
-        }
-    )
-    st.line_chart(
-        chart_df,
-        x="cycle",
-        y="cortisol_level",
-        height=280,
-        width="stretch",
-    )
+    chart_col, gauge_col = st.columns([2.15, 1], gap="large")
+    with chart_col:
+        st.subheader("Interoceptive cortisol")
+        n = min(len(st.session_state.cycle_index), len(st.session_state.cortisol_series))
+        deception = st.session_state.deception_series[-n:]
+        if len(deception) < n:
+            deception = [deception[0] if deception else 8.0] * (n - len(deception)) + deception
+        chart_df = pd.DataFrame(
+            {
+                "cycle": st.session_state.cycle_index[-n:],
+                "cortisol_level": st.session_state.cortisol_series[-n:],
+                "deception_probability": deception,
+            }
+        )
+        st.line_chart(
+            chart_df,
+            x="cycle",
+            y=["cortisol_level", "deception_probability"],
+            height=280,
+            width="stretch",
+        )
+    with gauge_col:
+        st.subheader("Analyst node")
+        _render_deception_gauge()
 
     persona_col, shadow_col = st.columns(2, gap="large")
     with persona_col:
@@ -275,6 +371,9 @@ def live_telemetry() -> None:
     if st.session_state.last_cycle:
         with st.expander("Last bridge packet", expanded=False):
             st.json(st.session_state.last_cycle)
+    if st.session_state.last_analyst:
+        with st.expander("Analyst report", expanded=False):
+            st.json(st.session_state.last_analyst)
 
     if not st.session_state.auto_live_feed:
         return
@@ -299,6 +398,9 @@ def _reset_loop() -> None:
     st.session_state.active_node = "Persona"
     st.session_state.auto_live_feed = False
     st.session_state.heartbeat_count = 0
+    st.session_state.analyst = AnalystNode()
+    st.session_state.deception_series = [8.0]
+    st.session_state.last_analyst = None
 
 
 def main() -> None:
@@ -351,6 +453,7 @@ def main() -> None:
         st.metric("Active node", st.session_state.active_node)
         st.metric("Cortisol", st.session_state.cortisol_series[-1])
         st.metric("Heartbeats", st.session_state.heartbeat_count)
+        st.metric("Deception %", f"{st.session_state.deception_series[-1]:.1f}")
         st.caption(
             f"Shadow threshold: {SHADOW_CORTISOL_THRESHOLD}. "
             f"Band: {CORTISOL_MIN}-{CORTISOL_MAX}. "
