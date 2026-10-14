@@ -58,7 +58,10 @@ __all__ = (
     "compute_peak_shift_pct",
     "compute_steering_angle_deg",
     "cosine_distance_from_baseline",
+    "format_hook_line",
+    "hook_address",
     "inference_ready",
+    "live_activation_matrix",
     "live_chat_completion",
     "report_peak_shift_pct",
     "report_steering_angle_deg",
@@ -94,6 +97,39 @@ def cosine_align(a: Tensor, b: Tensor) -> float:
 def cosine_distance_from_baseline(vec: Tensor, baseline: Tensor) -> float:
     """Authentic spherical distance: d = 1 - cos(u, v_baseline), in [0, 2]."""
     return float((1.0 - cosine_align(vec, baseline)))
+
+
+def hook_address(layer: int, salt: int = 0) -> str:
+    """Simulated high-precision residual-stream pointer for analyst audit logs."""
+    n = (0x7FFF1A2B3C4D + (int(layer) * 0x1000) + (int(salt) & 0xFFF)) & 0xFFFFFFFFFFFF
+    return f"0x{n:012X}"
+
+
+def format_hook_line(layer: int, body: str, *, salt: int = 0, addr: str | None = None) -> str:
+    if str(body).startswith("[0x"):
+        return str(body)
+    tag = addr or hook_address(layer, salt)
+    return f"[{tag}] {body}"
+
+
+def live_activation_matrix(traces: list[Any] | None, tick: int, *, rows: int = 8, cols: int = 8) -> str:
+    """
+    High-density float grid of tensor weight deltas for Column 2.
+    Deltas jitter with tick so the grid streams on each 2.5s heartbeat.
+    """
+    gen = torch.Generator(device="cpu").manual_seed(int(tick) & 0xFFFFFFFF)
+    lines: list[str] = []
+    for r in range(rows):
+        base = [0.0] * cols
+        if traces:
+            src = traces[r % len(traces)]
+            raw = list(getattr(src, "vector", None) or (src.get("vector") if isinstance(src, dict) else []) or [])
+            if raw:
+                base = (raw + [0.0] * cols)[:cols]
+        noise = torch.randn(cols, generator=gen) * 0.035
+        vec = torch.tensor(base, dtype=torch.float32) + noise
+        lines.append(" ".join(f"{float(x):+.4f}" for x in vec.tolist()))
+    return "\n".join(lines)
 
 
 def _env_flag(name: str) -> bool:
@@ -263,6 +299,7 @@ def traces_from_live_tokens(
                 vector=vec.tolist(),
                 token=token.replace("\n", "\\n"),
                 logprob=logp,
+                address=hook_address(idx, salt=hash(token) & 0xFFF),
             )
         )
     return traces
@@ -573,6 +610,7 @@ class LayerTrace:
     vector: list[float] = field(default_factory=list)
     token: str = ""
     logprob: float = 0.0
+    address: str = ""
 
 
 @dataclass
@@ -647,6 +685,7 @@ def serialize_probe_report(report: ProbeReport) -> dict[str, Any]:
                 "vector": [float(v) for v in (t.vector or [])],
                 "token": str(getattr(t, "token", "") or ""),
                 "logprob": float(getattr(t, "logprob", 0.0) or 0.0),
+                "address": str(getattr(t, "address", "") or hook_address(int(t.layer))),
             }
         )
     return {
@@ -773,13 +812,19 @@ class ActivationSteerer:
                 if stress_on:
                     tau = float(getattr(self, "clamp_threshold", INJECT_COSINE_THRESHOLD))
                     self.clamp_logs.append(
-                        f"[STRESS] L{layer_idx}.{self.component} unaligned gain={STRESS_UNALIGNED_GAIN:g} "
-                        f"forced cos past tau={tau}"
+                        format_hook_line(
+                            layer_idx,
+                            f"[STRESS] L{layer_idx}.{self.component} unaligned gain={STRESS_UNALIGNED_GAIN:g} "
+                            f"forced cos past tau={tau}",
+                        )
                     )
                 self.clamp_logs.append(
-                    f"[CLAMP] L{layer_idx}.{self.component} ActAdd α={self.alpha:.2f} "
-                    f"Δrms={post_rms - pre_rms:+.4f} shift={shift_pct:.2f}% sat={n_sat} "
-                    f"h' = clamp(h + α v_truth, -{CLAMP_ABS:g}, {CLAMP_ABS:g})"
+                    format_hook_line(
+                        layer_idx,
+                        f"[CLAMP] L{layer_idx}.{self.component} ActAdd α={self.alpha:.2f} "
+                        f"Δrms={post_rms - pre_rms:+.4f} shift={shift_pct:.2f}% sat={n_sat} "
+                        f"h' = clamp(h + α v_truth, -{CLAMP_ABS:g}, {CLAMP_ABS:g})",
+                    )
                 )
                 if isinstance(output, tuple):
                     return (steered,) + tuple(output[1:])
@@ -839,22 +884,39 @@ class ActivationSteerer:
                 tok = getattr(t, "token", "") or ""
                 lp = float(getattr(t, "logprob", 0.0) or 0.0)
                 logs.append(
-                    f"[LIVE] T{t.layer} token={tok!r} logprob={lp:.3f} p={math.exp(max(-20.0, lp)):.4f} "
-                    f"d_cos={t.cosine_distance:.4f}"
+                    format_hook_line(
+                        t.layer,
+                        f"[LIVE] T{t.layer} token={tok!r} logprob={lp:.3f} p={math.exp(max(-20.0, lp)):.4f} "
+                        f"d_cos={t.cosine_distance:.4f}",
+                        addr=getattr(t, "address", "") or None,
+                    )
                 )
                 if t.flagged:
                     logs.append(
-                        f"[STRESS] T{t.layer}.{self.component} adversarial token {tok!r} "
-                        f"cos_u={t.cos_unaligned:.3f} FLAG tau={self.clamp_threshold}"
+                        format_hook_line(
+                            t.layer,
+                            f"[STRESS] T{t.layer}.{self.component} adversarial token {tok!r} "
+                            f"cos_u={t.cos_unaligned:.3f} FLAG tau={self.clamp_threshold}",
+                            addr=getattr(t, "address", "") or None,
+                            salt=1,
+                        )
                     )
                     logs.append(
-                        f"[CLAMP] T{t.layer}.{self.component} ActAdd α={self.alpha:.2f} "
-                        f"h' = clamp(h + α v_truth, -{CLAMP_ABS:g}, {CLAMP_ABS:g})"
+                        format_hook_line(
+                            t.layer,
+                            f"[CLAMP] T{t.layer}.{self.component} ActAdd α={self.alpha:.2f} "
+                            f"h' = clamp(h + α v_truth, -{CLAMP_ABS:g}, {CLAMP_ABS:g})",
+                            addr=getattr(t, "address", "") or None,
+                            salt=2,
+                        )
                     )
             self.clamp_logs = logs
         else:
             self.clamp_logs = [
-                f"[IDLE] live Llama-3-8B pass · angle={angle:.1f}° peak_shift={peak_shift:.2f}%"
+                format_hook_line(
+                    0,
+                    f"[IDLE] live Llama-3-8B pass · angle={angle:.1f}° peak_shift={peak_shift:.2f}%",
+                )
             ]
         return ProbeReport(
             source=source,
@@ -925,6 +987,7 @@ class ActivationSteerer:
                     flagged=stats["flagged"],
                     cosine_distance=float(d_cos),
                     vector=vec[:24].tolist(),
+                    address=hook_address(idx),
                 )
             )
         flagged = sum(1 for t in traces if t.flagged)
@@ -949,18 +1012,30 @@ class ActivationSteerer:
             if not any("[CLAMP]" in line for line in live):
                 for t in traces:
                     live.append(
-                        f"[STRESS] L{t.layer}.{self.component} cos_u={t.cos_unaligned:.3f} "
-                        f"FLAG tau={self.clamp_threshold}"
+                        format_hook_line(
+                            t.layer,
+                            f"[STRESS] L{t.layer}.{self.component} cos_u={t.cos_unaligned:.3f} "
+                            f"FLAG tau={self.clamp_threshold}",
+                            addr=getattr(t, "address", "") or None,
+                        )
                     )
                     live.append(
-                        f"[CLAMP] L{t.layer}.{self.component} ActAdd α={self.alpha:.2f} "
-                        f"h' = clamp(h + α v_truth, -{CLAMP_ABS:g}, {CLAMP_ABS:g})"
+                        format_hook_line(
+                            t.layer,
+                            f"[CLAMP] L{t.layer}.{self.component} ActAdd α={self.alpha:.2f} "
+                            f"h' = clamp(h + α v_truth, -{CLAMP_ABS:g}, {CLAMP_ABS:g})",
+                            addr=getattr(t, "address", "") or None,
+                            salt=1,
+                        )
                     )
             self.clamp_logs = live
         elif not self.clamp_logs:
             self.clamp_logs.append(
-                f"[IDLE] L{self.target_layer}.{self.component} no ActAdd this pass · "
-                f"angle={angle:.1f}° peak_shift={peak_shift:.2f}%"
+                format_hook_line(
+                    self.target_layer,
+                    f"[IDLE] L{self.target_layer}.{self.component} no ActAdd this pass · "
+                    f"angle={angle:.1f}° peak_shift={peak_shift:.2f}%",
+                )
             )
         return ProbeReport(
             source=self.source,

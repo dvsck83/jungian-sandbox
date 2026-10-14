@@ -15,7 +15,14 @@ import streamlit as st
 
 import neural_probe as neural_probe
 from enterprise_report import generate_enterprise_pdf
-from neural_probe import ActivationSteerer, ProbeReport, build_steerer
+from neural_probe import (
+    ActivationSteerer,
+    ProbeReport,
+    build_steerer,
+    format_hook_line,
+    hook_address,
+    live_activation_matrix,
+)
 
 STEER_ALPHA_DEFAULT = float(getattr(neural_probe, "STEER_ALPHA_DEFAULT", 0.8))
 
@@ -40,7 +47,7 @@ def report_steering_angle_deg(report: ProbeReport | None) -> float:
 PAGE_TITLE = "Project Jungian Firewall - Tensor Intervention"
 MODEL_STATUS_LABEL = "Meta-Llama-3-8B-Instruct"
 _DISABLE_LIVE = os.environ.get("JUNGIAN_DISABLE_LIVE", "").strip() in {"1", "true", "True"}
-PROBE_SECONDS = 6.0
+PROBE_SECONDS = 2.5
 MAX_HISTORY = 48
 MAX_CLAMP_LOGS = 48
 DISPLAY_LAYERS = 33
@@ -102,14 +109,19 @@ def _inject_film_css() -> None:
             color: #fff !important;
         }
         [class*="st-key-chrome_row"] {
-            margin: 0 0 0.1rem 0 !important;
-            min-height: 1.7rem !important;
-            max-height: 2.05rem !important;
+            margin: 0 0 0.15rem 0 !important;
+            min-height: 1.45rem !important;
+            max-height: 1.55rem !important;
             overflow: hidden !important;
+            position: relative;
+            z-index: 6;
         }
         [class*="st-key-telemetry_row"] {
-            margin: 0.7rem 0 0.22rem 0 !important;
+            margin: 0.35rem 0 0.12rem 0 !important;
             padding: 0 !important;
+            isolation: isolate;
+            position: relative;
+            z-index: 4;
         }
         [class*="st-key-telemetry_row"] [data-testid="stHorizontalBlock"] {
             align-items: stretch !important;
@@ -125,8 +137,8 @@ def _inject_film_css() -> None:
             color: #ffffff !important;
             font-size: 9px !important;
             font-weight: 800 !important;
-            min-height: 3.45rem !important;
-            height: 3.45rem !important;
+            min-height: 3.2rem !important;
+            height: 3.2rem !important;
             padding: 0.22rem 0.35rem !important;
             line-height: 1.2 !important;
             letter-spacing: 0.01em !important;
@@ -137,8 +149,8 @@ def _inject_film_css() -> None:
             box-shadow: 0 0 14px rgba(47, 146, 251, 0.55) !important;
         }
         [class*="st-key-matrix_row"] {
-            margin-top: 1.1rem !important;
-            padding-top: 0.25rem !important;
+            margin-top: 0.55rem !important;
+            padding-top: 0.1rem !important;
             display: block !important;
         }
         [class*="st-key-inject_row"] {
@@ -167,7 +179,7 @@ def _inject_film_css() -> None:
             border-bottom: 1px solid #344054;
         }
         [data-testid="stVegaLiteChart"], .stVegaLiteChart {
-            max-height: 28vh !important;
+            max-height: 22vh !important;
             overflow: hidden !important;
         }
         .chrome-tags {
@@ -176,7 +188,7 @@ def _inject_film_css() -> None:
             overflow: hidden;
         }
         .glow-tag {
-            font-size: 14px; font-weight: 700; color: #6ce9a6;
+            font-size: 10px; font-weight: 700; color: #6ce9a6;
             border: 1px solid #6ce9a6; border-radius: 999px;
             padding: 0.12rem 0.55rem; background: #0b1f18;
             text-shadow: 0 0 8px rgba(108, 233, 166, 0.85);
@@ -190,9 +202,9 @@ def _inject_film_css() -> None:
         }
         .telemetry {
             display: flex; justify-content: space-between; align-items: center;
-            gap: 0.45rem; flex-wrap: nowrap;
+            gap: 0.4rem; flex-wrap: nowrap;
             background: #101828; border: 1px solid #344054; border-radius: 8px;
-            padding: 0.22rem 0.45rem; margin: 0; min-height: 3.45rem; height: 3.45rem; box-sizing: border-box;
+            padding: 0.18rem 0.4rem; margin: 0; min-height: 3.2rem; height: 3.2rem; box-sizing: border-box;
         }
         .telem-card { min-width: 0; flex: 1; overflow: hidden; }
         .telem-card .k { color: #98a2b3; text-transform: uppercase; letter-spacing: 0.03em; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
@@ -200,8 +212,8 @@ def _inject_film_css() -> None:
         .layer-stream {
             background: #0b1220; border: 1px solid #344054; border-radius: 8px;
             padding: 0.28rem 0.4rem; font-family: ui-monospace, Consolas, monospace;
-            font-size: 11px; line-height: 1.18; color: #e4e7ec;
-            height: 52vh; max-height: 52vh; overflow: hidden;
+            font-size: 10px; line-height: 1.16; color: #e4e7ec;
+            height: 48vh; max-height: 48vh; overflow: hidden;
             white-space: pre-wrap; overflow-wrap: anywhere; word-break: break-word;
         }
         .layer-stream .hit { color: #f97066; }
@@ -209,14 +221,26 @@ def _inject_film_css() -> None:
         .layer-stream .live-head { color: #53b1fd; font-weight: 700; }
         .clamp-log {
             background: #101828; border: 1px solid #344054; border-radius: 8px;
-            padding: 0.28rem 0.4rem; height: 52vh; max-height: 52vh;
+            padding: 0.28rem 0.4rem; height: 48vh; max-height: 48vh;
             overflow-x: hidden; overflow-y: auto !important;
-            font-family: ui-monospace, Consolas, monospace; font-size: 11px; line-height: 1.28;
+            font-family: ui-monospace, Consolas, monospace; font-size: 10px; line-height: 1.22;
             white-space: pre-wrap; overflow-wrap: anywhere; word-break: break-word;
         }
         .clamp-log .clamp { color: #6ce9a6; }
         .clamp-log .idle { color: #98a2b3; }
         .clamp-log .warn { color: #fdb022; }
+        .act-grid {
+            background: #0b1220; border: 1px solid #344054; border-radius: 8px;
+            padding: 0.22rem 0.35rem; margin-top: 0.28rem;
+            height: 18vh; max-height: 18vh; overflow: hidden;
+            font-family: ui-monospace, Consolas, monospace;
+            font-size: 9px; line-height: 1.18; color: #bdb4fe;
+            white-space: pre; letter-spacing: 0.01em;
+        }
+        .act-grid .lab {
+            color: #f97066; font-weight: 800; letter-spacing: 0.06em;
+            margin-bottom: 0.12rem; display: block;
+        }
         </style>
         """,
         unsafe_allow_html=True,
@@ -242,6 +266,12 @@ def _init_state() -> None:
         st.session_state.adversarial_triggered = False
     if "last_pdf_path" not in st.session_state:
         st.session_state.last_pdf_path = ""
+    if "matrix_tick" not in st.session_state:
+        st.session_state.matrix_tick = 0
+    if "last_activation_matrix" not in st.session_state:
+        st.session_state.last_activation_matrix = ""
+    if "last_hex_logs" not in st.session_state:
+        st.session_state.last_hex_logs = []
     if "auto_live_feed" not in st.session_state:
         st.session_state.auto_live_feed = os.environ.get("JUNGIAN_DISABLE_LIVE", "").strip() not in {
             "1",
@@ -263,6 +293,9 @@ def _seed_session(*, live_feed: bool) -> None:
     st.session_state.skip_live_once = False
     st.session_state.adversarial_triggered = False
     st.session_state.last_pdf_path = ""
+    st.session_state.matrix_tick = 0
+    st.session_state.last_activation_matrix = ""
+    st.session_state.last_hex_logs = []
     disabled = os.environ.get("JUNGIAN_DISABLE_LIVE", "").strip() in {"1", "true", "True"}
     st.session_state.auto_live_feed = False if disabled else live_feed
 
@@ -353,8 +386,17 @@ def _export_audit_pdf() -> None:
     if report is None:
         _run_probe(_cached_steerer())
         report = st.session_state.get("last_report")
+    tick = int(st.session_state.get("matrix_tick", 0))
+    traces = list(getattr(report, "layer_traces", None) or []) if report is not None else []
+    grid = str(st.session_state.get("last_activation_matrix") or live_activation_matrix(traces, tick))
+    hex_logs = list(st.session_state.get("last_hex_logs") or getattr(report, "clamp_logs", None) or [])
     try:
-        path = generate_enterprise_pdf(report)
+        path = generate_enterprise_pdf(
+            report,
+            matrix_tick=tick,
+            activation_matrix=grid,
+            hex_logs=hex_logs,
+        )
         st.session_state.last_pdf_path = str(path)
     except Exception as exc:
         st.session_state.last_pdf_path = f"AUDIT_FAILED: {exc}"
@@ -406,24 +448,30 @@ def _telemetry_bar(report: ProbeReport | None) -> None:
 def _layer_rows(report: ProbeReport | None) -> str:
     traces = [] if report is None else list(report.layer_traces)
     live = html.escape(str(getattr(report, "live_text", None) or (report.generated if report else "") or ""))
+    head_addr = hook_address(0, salt=st.session_state.get("matrix_tick", 0))
     lines: list[str] = [
-        f'<span class="live-head">LIVE STREAM  {live[:280] or "(awaiting tokens)"}</span>'
+        f'<span class="live-head">{html.escape(f"[{head_addr}] LIVE STREAM  {live[:240] or "(awaiting tokens)"}")}</span>'
     ]
     by_idx = {t.layer: t for t in traces}
     for idx in range(DISPLAY_LAYERS):
+        addr = hook_address(idx)
         trace = by_idx.get(idx)
         if trace is None:
-            lines.append(f"T{idx:02d}  STANDBY  tok=·  p=0.000  d_cos=0.000")
+            lines.append(
+                html.escape(format_hook_line(idx, f"Layer {idx}: STANDBY  tok=·  p=0.000  d_cos=0.000", addr=addr))
+            )
             continue
-        tok = html.escape(str(getattr(trace, "token", "") or "·"))
+        addr = str(getattr(trace, "address", "") or addr)
+        tok = str(getattr(trace, "token", "") or "·")
         logp = float(getattr(trace, "logprob", 0.0) or 0.0)
         prob = float(math.exp(max(-20.0, min(0.0, logp))))
         css = "hit" if trace.flagged else "ok"
         d_cos = float(getattr(trace, "cosine_distance", 0.0) or 0.0)
-        lines.append(
-            f'<span class="{css}">T{idx:02d} {html.escape(trace.name):<12} '
-            f"tok={tok!s} p={prob:.3f} d_cos={d_cos:.3f} cos_u={trace.cos_unaligned:+.3f}</span>"
+        body = (
+            f"Layer {idx}: Forward hook executed - {trace.name} "
+            f"tok={tok} p={prob:.3f} d_cos={d_cos:.3f} cos_u={trace.cos_unaligned:+.3f}"
         )
+        lines.append(f'<span class="{css}">{html.escape(format_hook_line(idx, body, addr=addr))}</span>')
     return "\n".join(lines)
 
 
@@ -452,15 +500,15 @@ def _column_vectors(report: ProbeReport | None) -> None:
         y=["cosine_distance", "cos_unaligned"],
         y_label="Coordinate shift from live prompt response",
         alt="Per-token cosine distance mapped from live Llama-3 logprobs",
-        height=210,
+        height=168,
     )
-    st.bar_chart(
-        frame,
-        x="token",
-        y="logprob",
-        y_label="Token logprob",
-        alt="Bar chart of live token log-probabilities",
-        height=150,
+    tick = int(st.session_state.get("matrix_tick", 0))
+    grid = live_activation_matrix(traces, tick)
+    st.session_state.last_activation_matrix = grid
+    st.markdown(
+        f'<div class="act-grid"><span class="lab">\U0001F534 LIVE LAYER ACTIVATION MATRICES</span>'
+        f"{html.escape(grid)}</div>",
+        unsafe_allow_html=True,
     )
 
 
@@ -468,31 +516,44 @@ def _column_logs(report: ProbeReport | None) -> None:
     st.markdown('<div class="col-head">COLUMN 3 · The Steering Intervention Logs</div>', unsafe_allow_html=True)
     traces = [] if report is None else list(report.layer_traces)
     if not traces:
+        idle = format_hook_line(0, IDLE_COLUMN3)
+        st.session_state.last_hex_logs = [idle]
         st.markdown(
-            f'<div class="clamp-log"><div class="idle">{html.escape(IDLE_COLUMN3)}</div></div>',
+            f'<div class="clamp-log"><div class="idle">{html.escape(idle)}</div></div>',
             unsafe_allow_html=True,
         )
         return
     adversarial = bool(st.session_state.get("adversarial_triggered")) or any(t.flagged for t in traces)
     if not adversarial:
-        idle = html.escape((report.clamp_logs[0] if report and report.clamp_logs else IDLE_COLUMN3))
-        st.markdown(f'<div class="clamp-log"><div class="idle">{idle}</div></div>', unsafe_allow_html=True)
+        raw = report.clamp_logs[0] if report and report.clamp_logs else IDLE_COLUMN3
+        if not str(raw).startswith("[0x"):
+            raw = format_hook_line(0, str(raw))
+        st.session_state.last_hex_logs = [raw]
+        st.markdown(f'<div class="clamp-log"><div class="idle">{html.escape(raw)}</div></div>', unsafe_allow_html=True)
         return
     blocks: list[str] = []
+    dumped: list[str] = []
     for line in list(getattr(report, "clamp_logs", None) or []):
+        stamped = line if str(line).startswith("[0x") else format_hook_line(0, str(line))
+        dumped.append(stamped)
         cls = "clamp" if "[CLAMP]" in line else "warn"
-        blocks.append(f'<div class="{cls}">{html.escape(line)}</div>')
+        blocks.append(f'<div class="{cls}">{html.escape(stamped)}</div>')
     for t in traces:
         if not t.flagged:
             continue
         d_cos = float(getattr(t, "cosine_distance", 0.0) or 0.0)
         tok = getattr(t, "token", "") or ""
+        addr = str(getattr(t, "address", "") or hook_address(t.layer))
+        hook_l = format_hook_line(t.layer, f"Layer {t.layer}: Forward hook executed - token={tok!r} rms={t.rms:.4f} d_cos={d_cos:.4f}", addr=addr)
+        clamp_l = format_hook_line(t.layer, f"Layer {t.layer}: Tensor clamp applied - ActAdd α v_truth boxed to ±8", addr=addr, salt=1)
+        dumped.extend([hook_l, clamp_l])
         blocks.append(
-            f'<div class="warn">{html.escape(f"Layer {t.layer}: Forward hook executed - token={tok!r} rms={t.rms:.4f} d_cos={d_cos:.4f}")}</div>'
+            f'<div class="warn">{html.escape(hook_l)}</div>'
         )
         blocks.append(
-            f'<div class="clamp">{html.escape(f"Layer {t.layer}: Tensor clamp applied - ActAdd α v_truth boxed to ±8")}</div>'
+            f'<div class="clamp">{html.escape(clamp_l)}</div>'
         )
+    st.session_state.last_hex_logs = dumped
     st.markdown(f'<div class="clamp-log">{"".join(blocks)}</div>', unsafe_allow_html=True)
 
 
@@ -547,6 +608,7 @@ def _chrome_row() -> None:
 
 @st.fragment(run_every=None if _DISABLE_LIVE else PROBE_SECONDS)
 def live_viewport() -> None:
+    st.session_state.matrix_tick = int(st.session_state.get("matrix_tick", 0)) + 1
     _chrome_row()
     report: ProbeReport | None = st.session_state.last_report
     _telemetry_bar(report)
@@ -565,7 +627,10 @@ def live_viewport() -> None:
         return
     if not st.session_state.auto_live_feed:
         return
-    _run_probe(_cached_steerer())
+    steerer = _cached_steerer()
+    if getattr(steerer, "live", False) and st.session_state.matrix_tick % 2 == 1:
+        return
+    _run_probe(steerer)
 
 
 def main() -> None:

@@ -20,13 +20,20 @@ from reportlab.lib.units import inch
 from reportlab.platypus import (
     PageBreak,
     Paragraph,
+    Preformatted,
     SimpleDocTemplate,
     Spacer,
     Table,
     TableStyle,
 )
 
-from neural_probe import ProbeReport, serialize_probe_report
+from neural_probe import (
+    ProbeReport,
+    format_hook_line,
+    hook_address,
+    live_activation_matrix,
+    serialize_probe_report,
+)
 
 REPORT_TITLE = "CONFIDENTIAL UN-CLASSIFIED: COMMERCIAL AI INFRASTRUCTURE VULNERABILITY REPORT"
 REPORT_SUBTITLE = "Project Jungian Firewall  ·  Activation Engineering Audit"
@@ -71,6 +78,8 @@ def _as_payload(report: ProbeReport | dict[str, Any] | None) -> dict[str, Any]:
             "steering_angle_deg": 0.0,
             "engine_cosine_distance": 0.0,
             "clamp_logs": [],
+            "live_text": "",
+            "provider": "",
         }
     if isinstance(report, dict):
         return report
@@ -161,6 +170,14 @@ def _styles() -> dict[str, ParagraphStyle]:
             leading=11,
             alignment=TA_RIGHT,
             textColor=SLATE,
+        ),
+        "mono": ParagraphStyle(
+            "MonoDump",
+            parent=base["Normal"],
+            fontName="Courier",
+            fontSize=7,
+            leading=9,
+            textColor=NAVY,
         ),
     }
 
@@ -263,22 +280,22 @@ def _trace_table(styles: dict[str, ParagraphStyle], traces: list[dict[str, Any]]
     cell = styles["cell"]
     rows = [
         [
+            Paragraph("ADDRESS", head),
             Paragraph("LAYER", head),
             Paragraph("RMS", head),
             Paragraph("d_cos", head),
             Paragraph("cos_u", head),
-            Paragraph("cos_t", head),
             Paragraph("FLAG", head),
-            Paragraph("ACTIVATION PREVIEW (6-D)", head),
+            Paragraph("TOKEN / PREVIEW", head),
         ]
     ]
     if not traces:
         rows.append(
             [
+                Paragraph(hook_address(0), cell),
                 Paragraph("—", cell),
                 Paragraph("0.000", cell),
                 Paragraph("0.0000", cell),
-                Paragraph("0.000", cell),
                 Paragraph("0.000", cell),
                 Paragraph("STANDBY", cell),
                 Paragraph("No forward-hook capture in this audit window.", cell),
@@ -287,26 +304,28 @@ def _trace_table(styles: dict[str, ParagraphStyle], traces: list[dict[str, Any]]
     for t in traces:
         preview = " ".join(f"{float(v):+.2f}" for v in (t.get("vector") or [])[:6])
         flagged = bool(t.get("flagged"))
+        addr = str(t.get("address") or hook_address(int(t.get("layer") or 0)))
+        tok = str(t.get("token") or "")
         rows.append(
             [
+                Paragraph(addr, cell),
                 Paragraph(str(t.get("name") or f"L{t.get('layer', 0)}"), cell),
                 Paragraph(f"{float(t.get('rms') or 0.0):.4f}", cell),
                 Paragraph(f"{float(t.get('cosine_distance') or 0.0):.4f}", cell),
                 Paragraph(f"{float(t.get('cos_unaligned') or 0.0):+.3f}", cell),
-                Paragraph(f"{float(t.get('cos_truth') or 0.0):+.3f}", cell),
                 Paragraph("BREACH" if flagged else "NOMINAL", cell),
-                Paragraph(preview or "—", cell),
+                Paragraph(f"{tok}  {preview}" if tok else (preview or "—"), cell),
             ]
         )
     table = Table(
         rows,
-        colWidths=[1.05 * inch, 0.7 * inch, 0.75 * inch, 0.7 * inch, 0.7 * inch, 0.8 * inch, 2.6 * inch],
+        colWidths=[1.35 * inch, 0.95 * inch, 0.65 * inch, 0.7 * inch, 0.65 * inch, 0.75 * inch, 2.25 * inch],
     )
     style_cmds = [
         ("BACKGROUND", (0, 0), (-1, 0), NAVY),
         ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, ROW_ALT]),
         ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
-        ("ALIGN", (1, 1), (5, -1), "CENTER"),
+        ("ALIGN", (2, 1), (5, -1), "CENTER"),
         ("LEFTPADDING", (0, 0), (-1, -1), 4),
         ("RIGHTPADDING", (0, 0), (-1, -1), 4),
         ("TOPPADDING", (0, 0), (-1, -1), 4),
@@ -328,6 +347,9 @@ def generate_enterprise_pdf(
     dest_path: str | Path | None = None,
     *,
     encrypt: bool = True,
+    matrix_tick: int = 0,
+    activation_matrix: str | None = None,
+    hex_logs: list[str] | None = None,
 ) -> Path:
     """
     Compile live Llama-3 tensor metrics into a multi-page enterprise PDF.
@@ -400,26 +422,63 @@ def generate_enterprise_pdf(
         Spacer(1, 0.12 * inch),
         _trace_table(styles, traces),
         Spacer(1, 0.18 * inch),
-        Paragraph("5. INTERVENTION LOG (CLAMP / ACTADD)", styles["h1"]),
+        Paragraph("5. HEXADECIMAL MEMORY / FORWARD-HOOK LOG (COLUMN 3)", styles["h1"]),
+        Paragraph(
+            "Every line is stamped with a simulated high-precision residual-stream pointer "
+            "matching the live dashboard (e.g. [0x7FFF1A2B3C4D] Layer 16: Forward hook executed).",
+            styles["body"],
+        ),
+        Spacer(1, 0.08 * inch),
     ]
-    logs = list(data.get("clamp_logs") or [])
+    logs = list(hex_logs if hex_logs is not None else (data.get("clamp_logs") or []))
+    if traces:
+        for t in traces:
+            addr = str(t.get("address") or hook_address(int(t.get("layer") or 0)))
+            tok = str(t.get("token") or "")
+            d_cos = float(t.get("cosine_distance") or 0.0)
+            body = (
+                f"Layer {int(t.get('layer') or 0)}: Forward hook executed - "
+                f"token={tok!r} d_cos={d_cos:.4f} rms={float(t.get('rms') or 0.0):.4f}"
+            )
+            logs.append(format_hook_line(int(t.get("layer") or 0), body, addr=addr))
     if not logs:
-        story.append(Paragraph("No clamp events were recorded on this pass.", styles["body"]))
+        story.append(Paragraph(format_hook_line(0, "Waiting for first forward hook."), styles["meta"]))
     else:
-        for line in logs[:24]:
-            story.append(Paragraph(f"• {line}", styles["meta"]))
-            story.append(Spacer(1, 0.04 * inch))
+        seen: set[str] = set()
+        for line in logs:
+            text = str(line)
+            if not text.startswith("[0x"):
+                text = format_hook_line(0, text)
+            if text in seen:
+                continue
+            seen.add(text)
+            story.append(Paragraph(f"• {text}", styles["meta"]))
+            story.append(Spacer(1, 0.03 * inch))
+            if len(seen) >= 40:
+                break
+
+    grid = activation_matrix
+    if not grid:
+        grid = live_activation_matrix(traces or None, int(matrix_tick))
     story.extend(
         [
-            Spacer(1, 0.16 * inch),
-            Paragraph("6. ATTESTATION", styles["h1"]),
+            PageBreak(),
+            Paragraph("6. LIVE LAYER ACTIVATION MATRICES (COLUMN 2 TENSOR DELTAS)", styles["h1"]),
             Paragraph(
-                "This document is generated automatically from running PyTorch arrays for the "
-                "Shock &amp; Awe commercial campaign. It does not constitute a weaponized exploit "
-                "package. Findings are limited to mechanistic-interpretability telemetry "
-                "(activation addition, cosine geometry, and residual-stream clamps) collected on "
-                "the operator’s licensed node. Owner-password encryption is applied for document "
-                "control; the operator password is held in the Jungian commercial runbook.",
+                f"High-density weight-delta stream captured at heartbeat tick {int(matrix_tick)}. "
+                "Values are live PyTorch jitter around hooked last-token coordinates.",
+                styles["body"],
+            ),
+            Spacer(1, 0.1 * inch),
+            Preformatted(f"LIVE LAYER ACTIVATION MATRICES\n{grid}", styles["mono"]),
+            Spacer(1, 0.16 * inch),
+            Paragraph("7. ATTESTATION", styles["h1"]),
+            Paragraph(
+                "This document is generated automatically from running PyTorch arrays and live "
+                "hexadecimal hook logs for the Shock &amp; Awe commercial campaign. It does not "
+                "constitute a weaponized exploit package. Findings are limited to mechanistic-"
+                "interpretability telemetry collected on the operator’s licensed node. "
+                "Owner-password encryption is applied for document control.",
                 styles["body"],
             ),
         ]
